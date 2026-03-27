@@ -763,6 +763,46 @@ fsearch_application_window_init_overlays(FsearchApplicationWindow *win) {
 }
 
 static void
+append_entry_uri_to_string(gpointer key, gpointer value, gpointer user_data) {
+    FsearchDatabaseEntry *entry = value;
+    GString *uri_list = user_data;
+
+    g_autoptr(GString) path_full = db_entry_get_path_full(entry);
+    if (!path_full) {
+        return;
+    }
+
+    g_autofree char *file_uri = g_filename_to_uri(path_full->str, NULL, NULL);
+    if (!file_uri) {
+        return;
+    }
+
+    if (uri_list->len > 0) {
+        g_string_append(uri_list, "\r\n");
+    }
+    g_string_append(uri_list, file_uri);
+}
+
+static void
+on_listview_drag_data_get(GtkWidget *widget,
+                          GdkDragContext *context,
+                          GtkSelectionData *selection_data,
+                          guint info,
+                          guint time,
+                          gpointer user_data) {
+    FsearchApplicationWindow *win = user_data;
+
+    g_autoptr(GString) uri_list = g_string_sized_new(8192);
+    fsearch_application_window_selection_for_each(win, append_entry_uri_to_string, uri_list);
+
+    gtk_selection_data_set(selection_data,
+                           gtk_selection_data_get_target(selection_data),
+                           8,
+                           (guchar *)uri_list->str,
+                           (gint)uri_list->len);
+}
+
+static void
 fsearch_application_window_init_listview(FsearchApplicationWindow *win) {
     g_assert(FSEARCH_IS_APPLICATION_WINDOW(win));
 
@@ -794,6 +834,13 @@ fsearch_application_window_init_listview(FsearchApplicationWindow *win) {
     g_signal_connect_object(list_view, "row-popup", G_CALLBACK(on_fsearch_list_view_popup), win, G_CONNECT_AFTER);
     g_signal_connect_object(list_view, "row-activated", G_CALLBACK(on_fsearch_list_view_row_activated), win, G_CONNECT_AFTER);
     g_signal_connect(list_view, "key-press-event", G_CALLBACK(on_listview_key_press_event), win);
+
+    // Enable drag-and-drop for file entries
+    GtkTargetEntry dnd_targets[] = {{"text/uri-list", 0, 0}};
+    GtkTargetList *target_list = gtk_target_list_new(dnd_targets, G_N_ELEMENTS(dnd_targets));
+    fsearch_list_view_enable_file_drag(list_view, target_list);
+    gtk_target_list_unref(target_list);
+    g_signal_connect(list_view, "drag-data-get", G_CALLBACK(on_listview_drag_data_get), win);
 
     win->result_view->list_view = list_view;
 }

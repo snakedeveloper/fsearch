@@ -137,3 +137,6 @@ fsearch_list_view_set_query_tooltip_func(FsearchListView *view,
 
 void
 fsearch_list_view_set_draw_row_func(FsearchListView *view, FsearchListViewDrawRowFunc func, gpointer func_data);
+
+void
+fsearch_list_view_enable_file_drag(FsearchListView *view, GtkTargetList *targets);

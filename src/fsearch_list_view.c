@@ -97,6 +97,14 @@ struct _FsearchListView {
     FsearchListViewUnselectAllFunc unselect_func;
     FsearchListViewNumSelectedFunc num_selected_func;
     gpointer selection_user_data;
+
+    // File drag-and-drop
+    gboolean dnd_enabled;
+    GtkTargetList *dnd_target_list;
+    gboolean pending_unselect;
+    gint pending_unselect_idx;
+    gboolean file_drag_mode;
+    gboolean dnd_started;
 };
 
 enum {
@@ -757,6 +765,12 @@ on_fsearch_list_view_multi_press_gesture_pressed(GtkGestureMultiPress *gesture,
         return;
     }
 
+    // Reset any stale DnD state from a previous interaction
+    view->pending_unselect = FALSE;
+    view->pending_unselect_idx = UNSET_ROW;
+    view->dnd_started = FALSE;
+    view->file_drag_mode = FALSE;
+
     gboolean modify_selection;
     gboolean extend_selection;
 
@@ -796,16 +810,23 @@ on_fsearch_list_view_multi_press_gesture_pressed(GtkGestureMultiPress *gesture,
             }
             else {
                 view->cursor_idx = row_idx;
-                fsearch_list_view_selection_clear_silent(view);
-                fsearch_list_view_selection_toggle_silent(view, row_idx);
-                if (view->single_click_activate) {
-                    FsearchListViewColumn *col = fsearch_list_view_get_col_for_x_view(view, x);
-                    if (col) {
-                        g_signal_emit(view,
-                                      signals[FSEARCH_LIST_VIEW_SIGNAL_ROW_ACTIVATED],
-                                      0,
-                                      col->type,
-                                      get_row_idx_for_sort_type(view, row_idx));
+                if (view->dnd_enabled && fsearch_list_view_is_selected(view, row_idx)) {
+                    // Defer selection change - this might be the start of a file drag
+                    view->pending_unselect = TRUE;
+                    view->pending_unselect_idx = row_idx;
+                }
+                else {
+                    fsearch_list_view_selection_clear_silent(view);
+                    fsearch_list_view_selection_toggle_silent(view, row_idx);
+                    if (view->single_click_activate) {
+                        FsearchListViewColumn *col = fsearch_list_view_get_col_for_x_view(view, x);
+                        if (col) {
+                            g_signal_emit(view,
+                                          signals[FSEARCH_LIST_VIEW_SIGNAL_ROW_ACTIVATED],
+                                          0,
+                                          col->type,
+                                          get_row_idx_for_sort_type(view, row_idx));
+                        }
                     }
                 }
             }
@@ -814,6 +835,9 @@ on_fsearch_list_view_multi_press_gesture_pressed(GtkGestureMultiPress *gesture,
         }
 
         if (n_press == 2 && !view->single_click_activate) {
+            // Double-click cancels any pending DnD defer
+            view->pending_unselect = FALSE;
+            view->pending_unselect_idx = UNSET_ROW;
             FsearchListViewColumn *col = fsearch_list_view_get_col_for_x_view(view, x);
             if (col) {
                 g_signal_emit(view,
@@ -856,6 +880,20 @@ on_fsearch_list_view_multi_press_gesture_released(GtkGestureMultiPress *gesture,
         return;
     }
 
+    if (view->pending_unselect) {
+        view->pending_unselect = FALSE;
+        if (!view->dnd_started) {
+            // No drag happened, so apply the deferred selection change
+            fsearch_list_view_selection_clear_silent(view);
+            fsearch_list_view_selection_toggle_silent(view, view->pending_unselect_idx);
+            fsearch_list_view_selection_changed(view);
+            gtk_widget_queue_draw(GTK_WIDGET(view));
+        }
+        view->dnd_started = FALSE;
+        view->pending_unselect_idx = UNSET_ROW;
+        return;
+    }
+
     int row_idx = fsearch_list_view_get_row_idx_for_y_view(view, y);
     if (row_idx < 0) {
         return;
@@ -868,6 +906,8 @@ on_fsearch_list_view_bin_drag_gesture_end(GtkGestureDrag *gesture,
                                           gdouble offset_y,
                                           FsearchListView *view) {
     //  GdkEventSequence *sequence = gtk_gesture_single_get_current_sequence(GTK_GESTURE_SINGLE(gesture));
+    view->file_drag_mode = FALSE;
+
     if (view->bin_drag_mode) {
         view->bin_drag_mode = FALSE;
         view->rubberband_state = RUBBERBAND_SELECT_INACTIVE;
@@ -1083,6 +1123,31 @@ on_fsearch_list_view_bin_drag_gesture_update(GtkGestureDrag *gesture,
     //     return;
     // }
 
+    if (view->file_drag_mode) {
+        gdouble start_x, start_y;
+        gtk_gesture_drag_get_start_point(GTK_GESTURE_DRAG(gesture), &start_x, &start_y);
+        if (gtk_drag_check_threshold(GTK_WIDGET(view),
+                                      (gint)start_x, (gint)start_y,
+                                      (gint)(start_x + offset_x), (gint)(start_y + offset_y))) {
+            const GdkEvent *event = gtk_gesture_get_last_event(GTK_GESTURE(gesture), sequence);
+            if (!event) {
+                view->file_drag_mode = FALSE;
+                return;
+            }
+            view->dnd_started = TRUE;
+            view->file_drag_mode = FALSE;
+            gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+            gtk_drag_begin_with_coordinates(GTK_WIDGET(view),
+                                             view->dnd_target_list,
+                                             GDK_ACTION_COPY,
+                                             GDK_BUTTON_PRIMARY,
+                                             (GdkEvent *)event,
+                                             (gint)(start_x + offset_x),
+                                             (gint)(start_y + offset_y));
+        }
+        return;
+    }
+
     if (view->bin_drag_mode == FALSE) {
         return;
     }
@@ -1096,17 +1161,26 @@ on_fsearch_list_view_bin_drag_gesture_begin(GtkGestureDrag *gesture,
                                             gdouble start_x,
                                             gdouble start_y,
                                             FsearchListView *view) {
-    if (start_y > view->header_height && !view->single_click_activate) {
+    if (start_y > view->header_height) {
         if (!gtk_widget_has_focus(GTK_WIDGET(view))) {
             gtk_widget_grab_focus(GTK_WIDGET(view));
         }
 
-        view->x_bin_drag_started = start_x + get_hscroll_pos(view);
-        view->y_bin_drag_started = start_y + get_vscroll_pos(view) - view->header_height;
-        view->bin_drag_mode = TRUE;
-        view->rubberband_state = RUBBERBAND_SELECT_WAITING;
-        fsearch_list_view_get_selection_modifiers(view, &view->rubberband_modify, &view->rubberband_extend);
-        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        int row_idx = fsearch_list_view_get_row_idx_for_y_view(view, start_y);
+        if (view->dnd_enabled && is_row_idx_valid(view, row_idx) && fsearch_list_view_is_selected(view, row_idx)) {
+            // Starting drag on a selected row - enter file drag mode
+            view->file_drag_mode = TRUE;
+            view->bin_drag_mode = FALSE;
+            gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        }
+        else if (!view->single_click_activate) {
+            view->x_bin_drag_started = start_x + get_hscroll_pos(view);
+            view->y_bin_drag_started = start_y + get_vscroll_pos(view) - view->header_height;
+            view->bin_drag_mode = TRUE;
+            view->rubberband_state = RUBBERBAND_SELECT_WAITING;
+            fsearch_list_view_get_selection_modifiers(view, &view->rubberband_modify, &view->rubberband_extend);
+            gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        }
     }
 }
 
@@ -1864,6 +1938,11 @@ fsearch_list_view_destroy(GtkWidget *widget) {
     g_clear_object(&view->bin_drag_gesture);
     g_clear_object(&view->header_drag_gesture);
 
+    if (view->dnd_target_list) {
+        gtk_target_list_unref(view->dnd_target_list);
+        view->dnd_target_list = NULL;
+    }
+
     GTK_WIDGET_CLASS(fsearch_list_view_parent_class)->destroy(widget);
 }
 
@@ -1935,6 +2014,13 @@ fsearch_list_view_init(FsearchListView *view) {
     view->highlight_cursor_idx = FALSE;
 
     view->extend_started_idx = UNSET_ROW;
+
+    view->dnd_enabled = FALSE;
+    view->dnd_target_list = NULL;
+    view->pending_unselect = FALSE;
+    view->pending_unselect_idx = UNSET_ROW;
+    view->file_drag_mode = FALSE;
+    view->dnd_started = FALSE;
 
     view->scroll_timeout = 0;
 
@@ -2360,4 +2446,13 @@ fsearch_list_view_column_new(int type,
     col->ref_count = 1;
 
     return col;
+}
+
+void
+fsearch_list_view_enable_file_drag(FsearchListView *view, GtkTargetList *targets) {
+    if (!view || !targets) {
+        return;
+    }
+    view->dnd_enabled = TRUE;
+    view->dnd_target_list = gtk_target_list_ref(targets);
 }
