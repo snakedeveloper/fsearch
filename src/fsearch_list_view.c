@@ -765,11 +765,9 @@ on_fsearch_list_view_multi_press_gesture_pressed(GtkGestureMultiPress *gesture,
         return;
     }
 
-    // Reset any stale DnD state from a previous interaction
     view->pending_unselect = FALSE;
     view->pending_unselect_idx = UNSET_ROW;
     view->dnd_started = FALSE;
-    view->file_drag_mode = FALSE;
 
     gboolean modify_selection;
     gboolean extend_selection;
@@ -1119,10 +1117,6 @@ on_fsearch_list_view_bin_drag_gesture_update(GtkGestureDrag *gesture,
                                              FsearchListView *view) {
     GdkEventSequence *sequence = gtk_gesture_single_get_current_sequence(GTK_GESTURE_SINGLE(gesture));
 
-    // if (gtk_gesture_get_sequence_state(GTK_GESTURE(gesture), sequence) != GTK_EVENT_SEQUENCE_CLAIMED) {
-    //     return;
-    // }
-
     if (view->file_drag_mode) {
         gdouble start_x, start_y;
         gtk_gesture_drag_get_start_point(GTK_GESTURE_DRAG(gesture), &start_x, &start_y);
@@ -1168,7 +1162,6 @@ on_fsearch_list_view_bin_drag_gesture_begin(GtkGestureDrag *gesture,
 
         int row_idx = fsearch_list_view_get_row_idx_for_y_view(view, start_y);
         if (view->dnd_enabled && is_row_idx_valid(view, row_idx) && fsearch_list_view_is_selected(view, row_idx)) {
-            // Starting drag on a selected row - enter file drag mode
             view->file_drag_mode = TRUE;
             view->bin_drag_mode = FALSE;
             gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
