@@ -10,6 +10,31 @@ resources += gnome.compile_resources('icon_resources',
     c_name: 'fsearch_icons',
 )
 
+monitor_common_deps = [
+    dependency('gio-unix-2.0', version: '>= 2.50'),
+]
+
+monitor_common_sources = [
+    'fsearch_ipc.c',
+    'fsearch_monitor_backend.c',
+    'fsearch_monitor_dirty_queue.c',
+]
+
+libfsearch_monitor_common = static_library(
+    'fsearch-monitor-common',
+    monitor_common_sources,
+    dependencies: monitor_common_deps,
+    include_directories: fsearch_include_dirs,
+)
+
+libfsearch_monitor_common_dep = declare_dependency(
+    link_with: libfsearch_monitor_common,
+    include_directories: [
+        fsearch_include_dirs,
+    ],
+    dependencies: monitor_common_deps,
+)
+
 libfsearch_sources = [
     resources,
     'fsearch.c',
@@ -88,6 +113,19 @@ libfsearch_dep = declare_dependency(
 fsearch = executable('fsearch', 'main.c',
     include_directories: fsearch_include_dirs,
     dependencies: libfsearch_dep,
+    install: true,
+)
+
+fsearchd = executable(
+    'fsearchd',
+    [
+        'fsearch_monitor_inotify.c',
+        'fsearch_monitor_manager.c',
+        'fsearchd.c',
+        'fsearchd_main.c',
+    ],
+    include_directories: fsearch_include_dirs,
+    dependencies: libfsearch_monitor_common_dep,
     install: true,
 )
 
